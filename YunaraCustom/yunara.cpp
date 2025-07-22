@@ -1,220 +1,298 @@
-#include "yunara.h"
+﻿#include "yunara.h"
+#include "../plugin_sdk/plugin_sdk.hpp"
 
-namespace yunara
+static script_spell* q = nullptr;
+static script_spell* w = nullptr;
+static script_spell* e = nullptr;
+static script_spell* r = nullptr;
+
+static int unleash_stacks = 0;
+
+float distance_point_to_line(const vector& pt, const vector& line_start, const vector& line_end)
 {
-    // Spell declarations
-    script_spell* q = nullptr;
-    script_spell* w = nullptr;
-    script_spell* e = nullptr;
-    script_spell* e2 = nullptr;
-    script_spell* r = nullptr;
+    // Вектор от line_start к pt
+    vector v = pt - line_start;
+    // Вектор от line_start к line_end
+    vector u = line_end - line_start;
 
-    TreeTab* main_tab = menu->create_tab("yunara", "Yunara Custom");
+    float len = u.length();
+    if (len == 0.f) return (pt - line_start).length();
 
-    namespace combo
+    float t = (v.x * u.x + v.y * u.y + v.z * u.z) / (len * len);
+    t = std::max(0.f, std::min(1.f, t));
+
+    vector projection = line_start + u * t;
+    return (pt - projection).length();
+}
+
+
+#define Q_DRAW_COLOR (D3DCOLOR_ARGB(255, 62, 129, 237))
+#define W_DRAW_COLOR (D3DCOLOR_ARGB(255, 227, 203, 20))
+#define E_DRAW_COLOR (D3DCOLOR_ARGB(255, 235, 12, 223))
+#define R_DRAW_COLOR (D3DCOLOR_ARGB(255, 224, 77, 13))
+
+namespace settings
+{
+    TreeTab* main_tab = nullptr;
+    TreeEntry* auto_q = nullptr;
+    TreeEntry* auto_w = nullptr;
+    TreeEntry* auto_e = nullptr;
+    TreeEntry* auto_r = nullptr;
+    TreeEntry* r_enemy_slider = nullptr;
+    TreeEntry* w_range = nullptr;
+}
+
+namespace draw_settings
+{
+    TreeEntry* draw_range_q = nullptr;
+    TreeEntry* draw_range_w = nullptr;
+    TreeEntry* draw_range_e = nullptr;
+    TreeEntry* draw_range_r = nullptr;
+}
+
+namespace farm_settings
+{
+    TreeEntry* farm_q = nullptr;
+    TreeEntry* farm_w = nullptr;
+}
+
+
+
+constexpr float Q_RANGE = 650.0f;
+constexpr float W_RANGE = 1150.0f;
+constexpr float W_WIDTH = 100.0f;
+constexpr float W_SPEED = 1600.0f;
+constexpr float E_RANGE = 500.0f;
+
+void try_cast_q()
+{
+    if (!settings::auto_q->get_bool() || !q->is_ready()) return;
+    if (unleash_stacks >= 8)
     {
-        TreeEntry* use_q = nullptr;
-        TreeEntry* use_w = nullptr;
-        TreeEntry* use_e = nullptr;
-        TreeEntry* use_r = nullptr;
-    }
-
-    namespace harass
-    {
-        TreeEntry* use_q = nullptr;
-        TreeEntry* use_w = nullptr;
-    }
-
-    namespace draw_settings
-    {
-        TreeEntry* draw_q = nullptr;
-        TreeEntry* draw_w = nullptr;
-        TreeEntry* draw_e = nullptr;
-        TreeEntry* draw_r = nullptr;
-    }
-
-    namespace misc
-    {
-        TreeEntry* show_passive = nullptr;
-        TreeEntry* debug_output = nullptr;
-    }
-
-    int passive_stacks = 0;
-    float last_stack_time = 0.0f;
-    float last_decay_time = 0.0f;
-    bool r_active = false;
-
-    void on_update()
-    {
-        if (myhero->is_dead()) return;
-        handle_passive();
-
-        if (orbwalker->combo_mode())
+        for (auto& enemy : entitylist->get_enemy_heroes())
         {
-            if (combo::use_r->get_bool() && r->is_ready())
-                r_logic();
-
-            if (combo::use_q->get_bool())
-                q_logic();
-
-            if (combo::use_w->get_bool())
-                w_logic();
-
-            if (combo::use_e->get_bool())
-                e_logic();
-        }
-        else if (orbwalker->harass())
-        {
-            if (harass::use_q->get_bool())
-                q_logic();
-
-            if (harass::use_w->get_bool())
-                w_logic();
-        }
-    }
-
-    void handle_passive()
-    {
-        if (orbwalker->get_last_target() != nullptr)
-        {
-            game_object_script target = orbwalker->get_last_target();
-            if (target->is_valid_target())
-            {
-                passive_stacks = std::min(8, passive_stacks + (target->is_ai_hero() ? 2 : 1));
-                last_stack_time = gametime->get_time();
-            }
-        }
-
-        if (gametime->get_time() - last_decay_time > 0.5f && gametime->get_time() - last_stack_time > 6.0f)
-        {
-            passive_stacks = std::max(0, passive_stacks - 1);
-            last_decay_time = gametime->get_time();
-        }
-    }
-
-    void q_logic()
-    {
-        if (is_transcendent())
-        {
-            if (!myhero->has_buff(buff_hash("YunaraQBuff")))
+            if (enemy && enemy->is_valid() && !enemy->is_dead() &&
+                enemy->get_distance(myhero) <= myhero->get_attack_range() + myhero->get_bounding_radius() + 50.0f)
             {
                 q->cast();
-                passive_stacks = 0;
+                unleash_stacks = 0; // Сбрасываем после каста
+                break;
             }
-            return;
-        }
-
-        if (passive_stacks >= 8 && q->is_ready())
-        {
-            q->cast();
-            passive_stacks = 0;
         }
     }
+}
 
-    void w_logic()
+
+
+
+
+void try_cast_w()
+{
+    if (!settings::auto_w->get_bool() || !w->is_ready()) return;
+    float max_range = static_cast<float>(settings::w_range->get_int());
+    auto target = target_selector->get_target(max_range, damage_type::magical);
+    if (target && target->is_valid() && !target->is_dead())
+        w->cast(target);
+}
+
+
+void try_cast_e()
+{
+    if (!settings::auto_e->get_bool() || !e->is_ready()) return;
+    auto target = target_selector->get_target(700.0f, damage_type::physical);
+    if (!target || !target->is_valid() || target->is_dead()) return;
+
+    if (myhero->has_buff(buff_hash("YunaraCombatTracker")))
     {
-        auto target = target_selector->get_target(w->range(), damage_type::magical);
-        if (!target || !target->is_valid_target()) return;
-
-        if (target->has_buff_type(buff_type::Stun) ||
-            target->has_buff_type(buff_type::Snare) ||
-            target->has_buff_type(buff_type::Slow))
-        {
-            w->cast(target->get_position());
-        }
+        if (myhero->get_distance(target) <= E_RANGE + 100.0f)
+            e->cast(target->get_position());
     }
-
-    void e_logic()
+    else
     {
-        auto target = target_selector->get_target(800, damage_type::physical);
-        if (!target || !target->is_valid_target()) return;
-
-        if (is_transcendent() && e2 && e2->is_ready())
-        {
-            e2->cast(target->get_position());
-        }
-        else if (e && e->is_ready())
-        {
+        float chase_range = myhero->get_attack_range() + 200.0f;
+        if (target->get_distance(myhero) > chase_range)
             e->cast();
+    }
+}
+
+void try_cast_r()
+{
+    if (!settings::auto_r->get_bool() || !r->is_ready()) return;
+    int enemies = 0;
+    for (auto& hero : entitylist->get_enemy_heroes())
+        if (hero && hero->is_valid() && !hero->is_dead() &&
+            hero->get_distance(myhero) < 700.0f)
+            enemies++;
+    if (enemies >= settings::r_enemy_slider->get_int())
+        r->cast();
+}
+
+void farm_with_q()
+{
+    if (!farm_settings::farm_q->get_bool() || !q->is_ready() || unleash_stacks < 8)
+        return;
+
+    int count = 0;
+    for (auto& minion : entitylist->get_enemy_minions())
+    {
+        if (!minion->is_valid_target(q->range()))
+            continue;
+
+        if (minion->get_distance(myhero) <= myhero->get_attack_range() + myhero->get_bounding_radius() + 20.f)
+            count++;
+    }
+
+    if (count >= 3)
+    {
+        if (q->cast())
+            unleash_stacks = 0;
+    }
+}
+
+
+void farm_with_w()
+{
+    if (!farm_settings::farm_w->get_bool() || !w->is_ready())
+        return;
+
+    float max_range = static_cast<float>(settings::w_range->get_int());
+    auto minions = entitylist->get_enemy_minions();
+    int best_count = 0;
+    vector best_pos;
+
+    for (auto& minion : minions)
+    {
+        if (!minion->is_valid_target(max_range))
+            continue;
+
+        int count = 1;
+        vector cast_from = myhero->get_position();
+        vector cast_to = minion->get_position();
+
+        for (auto& other : minions)
+        {
+            if (other == minion || !other->is_valid_target(max_range))
+                continue;
+
+            float dist = distance_point_to_line(other->get_position(), cast_from, cast_to);
+            if (dist < W_WIDTH) // ширина W
+                count++;
+        }
+        if (count > best_count)
+        {
+            best_count = count;
+            best_pos = cast_to;
         }
     }
 
-    void r_logic()
+    if (best_count >= 2)
+        w->cast(best_pos);
+    console->print("farm_with_w: best_count=%d, best_pos=(%.0f,%.0f,%.0f)\n", best_count, best_pos.x, best_pos.y, best_pos.z);
+
+}
+
+
+
+
+
+
+void on_draw()
+{
+    if (draw_settings::draw_range_q->get_bool())
+        draw_manager->add_circle(myhero->get_position(), q->range(), Q_DRAW_COLOR);
+    if (draw_settings::draw_range_w->get_bool())
+        draw_manager->add_circle(myhero->get_position(), w->range(), W_DRAW_COLOR);
+    if (draw_settings::draw_range_e->get_bool())
+        draw_manager->add_circle(myhero->get_position(), e->range(), E_DRAW_COLOR);
+    if (draw_settings::draw_range_r->get_bool())
+        draw_manager->add_circle(myhero->get_position(), r->range(), R_DRAW_COLOR);
+    draw_manager->add_text_on_screen({ 30, 80 }, MAKE_COLOR(255, 255, 0, 255), 18,
+        ("Yunara Q stacks: " + std::to_string(unleash_stacks)).c_str());
+
+}
+
+void on_update()
+{
+    if (!myhero || myhero->is_dead()) return;
+
+    if (orbwalker->combo_mode())
     {
-        if (!r_active)
-            enter_transcendence();
-        else
-            exit_transcendence();
+        try_cast_q();
+        try_cast_w();
+        try_cast_e();
+        try_cast_r();
     }
-
-    void enter_transcendence()
+    else if (orbwalker->lane_clear_mode() || orbwalker->last_hit_mode())
     {
-        r->cast();
-        r_active = true;
+        farm_with_q();
+        farm_with_w();
     }
+}
 
-    void exit_transcendence()
-    {
-        r_active = false;
-    }
 
-    void on_draw()
-    {
-        if (draw_settings::draw_q->get_bool())
-            draw_manager->add_circle(myhero->get_position(), 0, 255);
+// Допустим, есть callback on_after_attack или on_process_spell
+void on_after_attack(game_object_script target)
+{
+    if (target->is_ai_hero())
+        unleash_stacks += 2;
+    else if (target->is_ai_minion())
+        unleash_stacks += 1;
+    // Ограничиваем максимум
+    if (unleash_stacks > 8)
+        unleash_stacks = 8;
+}
 
-        if (draw_settings::draw_w->get_bool())
-            draw_manager->add_circle(myhero->get_position(), w->range(), 200);
 
-        if (draw_settings::draw_e->get_bool())
-            draw_manager->add_circle(myhero->get_position(), 450, 111);
+void yunara::load()
+{
+    q = plugin_sdk->register_spell(spellslot::q, Q_RANGE);
+    w = plugin_sdk->register_spell(spellslot::w, W_RANGE);
+    e = plugin_sdk->register_spell(spellslot::e, E_RANGE);
+    r = plugin_sdk->register_spell(spellslot::r, 0.0f);
 
-        if (draw_settings::draw_r->get_bool())
-            draw_manager->add_circle(myhero->get_position(), 0, 222);
-    }
+    w->set_skillshot(0.25f, W_WIDTH, W_SPEED, { collisionable_objects::minions }, skillshot_type::skillshot_line);
 
-    void on_create(game_object_script obj) {}
-    void on_before_attack(game_object_script target, bool* process) {}
-    void on_attack(game_object_script target) {}
+    settings::main_tab = menu->create_tab("carry.yunara", "Yunara");
 
-    void load()
-    {
-        q = plugin_sdk->register_spell(spellslot::q, 300);
-        w = plugin_sdk->register_spell(spellslot::w, 1150);
-        e = plugin_sdk->register_spell(spellslot::e,0);
-        e2 = plugin_sdk->register_spell(spellslot::e, 450);
-        r = plugin_sdk->register_spell(spellslot::r,0);
+    auto main = settings::main_tab->add_tab("carry.yunara.main", "Main settings");
+    settings::auto_q = main->add_checkbox("carry.yunara.main.q", "Auto Q", true);
+    settings::auto_w = main->add_checkbox("carry.yunara.main.w", "Auto W", true);
+    settings::auto_e = main->add_checkbox("carry.yunara.main.e", "Auto E", true);
+    settings::auto_r = main->add_checkbox("carry.yunara.main.r", "Auto R", true);
+    settings::r_enemy_slider = main->add_slider("carry.yunara.main.r_slider", "Auto R если врагов >=", 2, 1, 5);
+    settings::w_range = main->add_slider("carry.yunara.main.whc", "W Range", 1150, 0, 1150);
 
-        combo::use_q = main_tab->add_checkbox("combo_q", "Use Q", true);
-        combo::use_w = main_tab->add_checkbox("combo_w", "Use W", true);
-        combo::use_e = main_tab->add_checkbox("combo_e", "Use E", true);
-        combo::use_r = main_tab->add_checkbox("combo_r", "Use R", true);
+    auto farm = settings::main_tab->add_tab("carry.yunara.farm", "Farm settings");
+    farm_settings::farm_q = farm->add_checkbox("carry.yunara.farm.q", "Farm Q", true);
+    farm_settings::farm_w = farm->add_checkbox("carry.yunara.farm.w", "Farm W", true);
+	farm_settings::farm_w->set_tooltip("Use W to farm minions, requires W to be set in main settings");
 
-        harass::use_q = main_tab->add_checkbox("harass_q", "Use Q in Harass", true);
-        harass::use_w = main_tab->add_checkbox("harass_w", "Use W in Harass", false);
+    auto draw = settings::main_tab->add_tab("carry.yunara.draw", "Draw Settings");
+    draw_settings::draw_range_q = draw->add_checkbox("carry.yunara.draw.q", "Draw Q range", true);
+    draw_settings::draw_range_w = draw->add_checkbox("carry.yunara.draw.w", "Draw W range", true);
+    draw_settings::draw_range_e = draw->add_checkbox("carry.yunara.draw.e", "Draw E range", true);
+    draw_settings::draw_range_r = draw->add_checkbox("carry.yunara.draw.r", "Draw R range", true);
 
-        draw_settings::draw_q = main_tab->add_checkbox("draw_q", "Draw Q Range", true);
-        draw_settings::draw_w = main_tab->add_checkbox("draw_w", "Draw W Range", true);
-        draw_settings::draw_e = main_tab->add_checkbox("draw_e", "Draw E Range", true);
-        draw_settings::draw_r = main_tab->add_checkbox("draw_r", "Draw R Range", false);
 
-        event_handler<events::on_update>::add_callback(on_update);
-        event_handler<events::on_draw>::add_callback(on_draw);
-    }
+    event_handler<events::on_update>::add_callback(on_update);
+    event_handler<events::on_draw>::add_callback(on_draw);
+    event_handler<events::on_after_attack_orbwalker>::add_callback(on_after_attack);
 
-    void unload()
-    {
-        plugin_sdk->remove_spell(q);
-        plugin_sdk->remove_spell(w);
-        plugin_sdk->remove_spell(e);
-        plugin_sdk->remove_spell(e2);
-        plugin_sdk->remove_spell(r);
+}
 
-        event_handler<events::on_update>::remove_handler(on_update);
-        event_handler<events::on_draw>::remove_handler(on_draw);
 
-        menu->delete_tab(main_tab);
-    }
+void yunara::unload()
+{
+    menu->delete_tab(settings::main_tab);
+  
 
-   
+    plugin_sdk->remove_spell(q);
+    plugin_sdk->remove_spell(w);
+    plugin_sdk->remove_spell(e);
+    plugin_sdk->remove_spell(r);
+
+    event_handler<events::on_update>::remove_handler(on_update);
+    event_handler<events::on_draw>::remove_handler(on_draw);
+	event_handler<events::on_after_attack_orbwalker>::remove_handler(on_after_attack);
+
 }
