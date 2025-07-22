@@ -7,6 +7,7 @@ static script_spell* e = nullptr;
 static script_spell* r = nullptr;
 
 static int unleash_stacks = 0;
+static float last_stack_time = 0.0f;
 
 float distance_point_to_line(const vector& pt, const vector& line_start, const vector& line_end)
 {
@@ -24,6 +25,9 @@ float distance_point_to_line(const vector& pt, const vector& line_start, const v
     vector projection = line_start + u * t;
     return (pt - projection).length();
 }
+
+
+
 
 
 #define Q_DRAW_COLOR (D3DCOLOR_ARGB(255, 62, 129, 237))
@@ -53,7 +57,9 @@ namespace draw_settings
 namespace farm_settings
 {
     TreeEntry* farm_q = nullptr;
+    TreeEntry* farm_q_min_aoe = nullptr;
     TreeEntry* farm_w = nullptr;
+    TreeEntry* farm_w_min = nullptr; 
 }
 
 
@@ -102,7 +108,7 @@ void try_cast_e()
     auto target = target_selector->get_target(700.0f, damage_type::physical);
     if (!target || !target->is_valid() || target->is_dead()) return;
 
-    if (myhero->has_buff(buff_hash("YunaraCombatTracker")))
+    if (myhero->has_buff(buff_hash("YunaraRbuff")))
     {
         if (myhero->get_distance(target) <= E_RANGE + 100.0f)
             e->cast(target->get_position());
@@ -132,22 +138,47 @@ void farm_with_q()
     if (!farm_settings::farm_q->get_bool() || !q->is_ready() || unleash_stacks < 8)
         return;
 
-    int count = 0;
-    for (auto& minion : entitylist->get_enemy_minions())
+    const float Q_AOE_RANGE = 250.0f;
+    const int minion_threshold = 2;
+
+    auto minions = entitylist->get_enemy_minions();
+
+    for (auto& main : minions)
     {
-        if (!minion->is_valid_target(q->range()))
+        if (!main->is_valid_target(q->range()))
             continue;
 
-        if (minion->get_distance(myhero) <= myhero->get_attack_range() + myhero->get_bounding_radius() + 20.f)
-            count++;
-    }
+        int aoe_count = 0;
+        vector hero_to_main = main->get_position() - myhero->get_position();
 
-    if (count >= 3)
-    {
-        if (q->cast())
-            unleash_stacks = 0;
+        for (auto& other : minions)
+        {
+            if (other == main || !other->is_valid_target(q->range()))
+                continue;
+
+            vector main_to_other = other->get_position() - main->get_position();
+
+            float forward = (hero_to_main.x * main_to_other.x + hero_to_main.y * main_to_other.y);
+            if (forward <= 0) // только позади main относительно героя
+                continue;
+
+            float dist = sqrtf(main_to_other.x * main_to_other.x + main_to_other.y * main_to_other.y);
+            if (dist < Q_AOE_RANGE)
+                aoe_count++;
+        }
+
+        // Если позади стоит минимум два миньона — жмём Q
+        if (aoe_count >= minion_threshold)
+        {
+            if (q->cast())
+                unleash_stacks = 0;
+            break;
+        }
     }
 }
+
+
+
 
 
 void farm_with_w()
@@ -156,6 +187,8 @@ void farm_with_w()
         return;
 
     float max_range = static_cast<float>(settings::w_range->get_int());
+    int min_minions = farm_settings::farm_w_min->get_int();
+
     auto minions = entitylist->get_enemy_minions();
     int best_count = 0;
     vector best_pos;
@@ -175,7 +208,7 @@ void farm_with_w()
                 continue;
 
             float dist = distance_point_to_line(other->get_position(), cast_from, cast_to);
-            if (dist < W_WIDTH) // ширина W
+            if (dist < W_WIDTH)
                 count++;
         }
         if (count > best_count)
@@ -185,11 +218,10 @@ void farm_with_w()
         }
     }
 
-    if (best_count >= 2)
+    if (best_count >= min_minions)
         w->cast(best_pos);
-    console->print("farm_with_w: best_count=%d, best_pos=(%.0f,%.0f,%.0f)\n", best_count, best_pos.x, best_pos.y, best_pos.z);
-
 }
+
 
 
 
@@ -215,6 +247,10 @@ void on_update()
 {
     if (!myhero || myhero->is_dead()) return;
 
+    // Чётко по вики: баф длится 6 сек
+    if (unleash_stacks > 0 && gametime->get_time() - last_stack_time >= 6.0f)
+        unleash_stacks = 0;
+
     if (orbwalker->combo_mode())
     {
         try_cast_q();
@@ -222,7 +258,7 @@ void on_update()
         try_cast_e();
         try_cast_r();
     }
-    else if (orbwalker->lane_clear_mode() || orbwalker->last_hit_mode())
+    else if (orbwalker->lane_clear_mode())
     {
         farm_with_q();
         farm_with_w();
@@ -230,16 +266,15 @@ void on_update()
 }
 
 
-// Допустим, есть callback on_after_attack или on_process_spell
 void on_after_attack(game_object_script target)
 {
     if (target->is_ai_hero())
         unleash_stacks += 2;
     else if (target->is_ai_minion())
         unleash_stacks += 1;
-    // Ограничиваем максимум
     if (unleash_stacks > 8)
         unleash_stacks = 8;
+    last_stack_time = gametime->get_time();
 }
 
 
@@ -259,13 +294,18 @@ void yunara::load()
     settings::auto_w = main->add_checkbox("carry.yunara.main.w", "Auto W", true);
     settings::auto_e = main->add_checkbox("carry.yunara.main.e", "Auto E", true);
     settings::auto_r = main->add_checkbox("carry.yunara.main.r", "Auto R", true);
-    settings::r_enemy_slider = main->add_slider("carry.yunara.main.r_slider", "Auto R если врагов >=", 2, 1, 5);
+    settings::r_enemy_slider = main->add_slider("carry.yunara.main.r_slider", "Auto R if X enemys near >=", 2, 1, 5);
     settings::w_range = main->add_slider("carry.yunara.main.whc", "W Range", 1150, 0, 1150);
 
     auto farm = settings::main_tab->add_tab("carry.yunara.farm", "Farm settings");
     farm_settings::farm_q = farm->add_checkbox("carry.yunara.farm.q", "Farm Q", true);
+    farm_settings::farm_q_min_aoe = farm->add_slider(
+        "carry.yunara.farm.q_min_aoe", "Min minions for Q AOE farm", 2, 0, 8);
+
     farm_settings::farm_w = farm->add_checkbox("carry.yunara.farm.w", "Farm W", true);
-	farm_settings::farm_w->set_tooltip("Use W to farm minions, requires W to be set in main settings");
+   
+    farm_settings::farm_w_min = farm->add_slider(
+        "carry.yunara.farm.w_min", "Min minions for W farm", 3, 0, 8);
 
     auto draw = settings::main_tab->add_tab("carry.yunara.draw", "Draw Settings");
     draw_settings::draw_range_q = draw->add_checkbox("carry.yunara.draw.q", "Draw Q range", true);
