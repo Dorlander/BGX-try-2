@@ -1,10 +1,10 @@
-﻿#include "../plugin_sdk/plugin_sdk.hpp"
+﻿#pragma once
+#include "../plugin_sdk/plugin_sdk.hpp"
 
-
-namespace yunara {
-    
+// Yunara namespace for all code
+namespace yunara
+{
+    // Запуск и выгрузка
     void load();
-
     void unload();
-
 }
